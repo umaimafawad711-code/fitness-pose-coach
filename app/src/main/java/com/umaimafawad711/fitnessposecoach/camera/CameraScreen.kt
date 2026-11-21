@@ -30,8 +30,11 @@ import com.umaimafawad711.fitnessposecoach.pose.PoseEstimator
 import com.umaimafawad711.fitnessposecoach.pose.PoseResult
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import com.umaimafawad711.fitnessposecoach.analysis.ExerciseStateMachine
+import com.umaimafawad711.fitnessposecoach.analysis.ExerciseType
 
-class CameraScreen : Fragment(R.layout.fragment_camera) {
+class CameraScreen :
+    Fragment(R.layout.fragment_camera) {
 
     private var _binding: FragmentCameraBinding? = null
     private val binding get() = checkNotNull(_binding)
@@ -41,6 +44,9 @@ class CameraScreen : Fragment(R.layout.fragment_camera) {
 
     // Created and used only on analysisExecutor's thread (TFLite Interpreter is not thread-safe).
     private var poseEstimator: PoseEstimator? = null
+
+    // Added State Machine (Hardcoded to SQUAT for now)
+    private val stateMachine = ExerciseStateMachine(ExerciseType.SQUAT)
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var lensFacing = CameraSelector.LENS_FACING_FRONT
@@ -141,6 +147,9 @@ class CameraScreen : Fragment(R.layout.fragment_camera) {
             .build()
             .also { it.setAnalyzer(analysisExecutor) { image -> analyze(image) } }
 
+        // Added: Update Overlay mirror based on front/back camera
+        binding.overlay.mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT
+
         try {
             require(provider.hasCamera(selector)) { "No camera for lens facing $lensFacing" }
             provider.unbindAll()
@@ -164,7 +173,11 @@ class CameraScreen : Fragment(R.layout.fragment_camera) {
         }
     }
 
+    // Replaced: Updated handleResult to include State Machine logic and Overlay updates
     private fun handleResult(result: PoseResult) {
+        val snapshot = stateMachine.update(result, SystemClock.elapsedRealtime())
+        _binding?.overlay?.update(result)
+
         frameCount++
         val now = SystemClock.elapsedRealtime()
         if (now - windowStartMs >= 1000) {
@@ -172,7 +185,9 @@ class CameraScreen : Fragment(R.layout.fragment_camera) {
             frameCount = 0
             windowStartMs = now
         }
-        val text = "FPS $fps | ${result.latencyMs} ms | keypoints ${result.visibleCount}/17"
+        val angleText = snapshot.angle?.let { "${it.toInt()}°" } ?: "--"
+        val text = "FPS $fps | ${result.latencyMs} ms | ${stateMachine.exercise.displayName}" +
+                " | angle $angleText | ${snapshot.state} | reps ${snapshot.reps}"
         _binding?.root?.post { _binding?.tvDebug?.text = text }
     }
 
