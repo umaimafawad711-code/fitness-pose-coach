@@ -1,0 +1,45 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/**/build/
+
+# Local config
+local.properties
+*.properties.local
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# Signing (NEVER commit)
+*.jks
+*.keystore
+keystore.properties
+google-services.json
+
+# APK / AAB outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+output-metadata.json
+
+# Logs
+*.log
+
+# Test / lint reports
+lint-results*.xml
+lint-results*.html
+reports/
+
+# Generated
+bin/
+gen/
+out/
+release/
