@@ -18,10 +18,8 @@ class ExerciseSelectScreen : Fragment(R.layout.fragment_exercise_select) {
         val binding = FragmentExerciseSelectBinding.bind(view)
         binding.btnSquat.setOnClickListener { start(ExerciseType.SQUAT) }
         binding.btnPushUp.setOnClickListener { start(ExerciseType.PUSH_UP) }
-        binding.btnLunge.setOnClickListener { start(ExerciseType.LUNGE)
-            binding.btnHistory.setOnClickListener {
-                findNavController().navigate(R.id.action_select_to_history)
-            }}
+        binding.btnLunge.setOnClickListener { start(ExerciseType.LUNGE)}
+        binding.btnHistory.setOnClickListener { findNavController().navigate(R.id.action_select_to_history)}
     }
 
     private fun start(type: ExerciseType) {
