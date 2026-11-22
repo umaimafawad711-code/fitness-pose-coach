@@ -78,4 +78,8 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+
+    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+
 }

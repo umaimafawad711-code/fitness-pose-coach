@@ -11,6 +11,9 @@
         <action
             android:id="@+id/action_select_to_camera"
             app:destination="@id/cameraScreen" />
+        <action
+            android:id="@+id/action_select_to_history"
+            app:destination="@id/historyScreen" />
     </fragment>
 
     <fragment
@@ -28,4 +31,8 @@
         android:id="@+id/summaryScreen"
         android:name="com.umaimafawad711.fitnessposecoach.ui.summary.SummaryScreen"
         android:label="Summary" />
+    <fragment
+        android:id="@+id/historyScreen"
+        android:name="com.umaimafawad711.fitnessposecoach.ui.history.HistoryScreen"
+        android:label="History" />
 </navigation>

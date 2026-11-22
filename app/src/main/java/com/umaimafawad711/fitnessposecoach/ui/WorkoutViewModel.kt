@@ -26,8 +26,8 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     private val _lastSession = MutableStateFlow<SessionResult?>(null)
     val lastSession: StateFlow<SessionResult?> = _lastSession.asStateFlow()
 
-    val workouts: StateFlow<List<WorkoutEntity>> = repository.workouts
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val workouts: StateFlow<List<WorkoutEntity>?> = repository.workouts
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val dailyStats: StateFlow<List<DailyStat>> = repository.observeDailyStats(DAYS_IN_CHART)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -48,7 +48,7 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { repository.clear() }
     }
 
-    private companion object {
+    companion object {
         const val DAYS_IN_CHART = 7
     }
 }
