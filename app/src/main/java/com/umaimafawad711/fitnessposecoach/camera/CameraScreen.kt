@@ -32,7 +32,12 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import com.umaimafawad711.fitnessposecoach.analysis.ExerciseStateMachine
 import com.umaimafawad711.fitnessposecoach.analysis.ExerciseType
-
+import android.graphics.Color
+import com.umaimafawad711.fitnessposecoach.analysis.Feedback
+import com.umaimafawad711.fitnessposecoach.analysis.FormScoreTracker
+import com.umaimafawad711.fitnessposecoach.analysis.FormValidator
+import com.umaimafawad711.fitnessposecoach.analysis.Severity
+import com.umaimafawad711.fitnessposecoach.voice.VoiceCoach
 class CameraScreen :
     Fragment(R.layout.fragment_camera) {
 
@@ -46,8 +51,15 @@ class CameraScreen :
     private var poseEstimator: PoseEstimator? = null
 
     // Added State Machine (Hardcoded to SQUAT for now)
-    private val stateMachine = ExerciseStateMachine(ExerciseType.SQUAT)
 
+    private val exercise = ExerciseType.SQUAT
+    private val stateMachine = ExerciseStateMachine(exercise)
+    private val validator = FormValidator(exercise)
+    private val scoreTracker = FormScoreTracker()
+    private var stickyFeedback: Feedback? = null
+    private var stickyUntilMs = 0L
+
+    private var voiceCoach: VoiceCoach? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var lensFacing = CameraSelector.LENS_FACING_FRONT
     private var permissionRequested = false
@@ -66,6 +78,7 @@ class CameraScreen :
         _binding = FragmentCameraBinding.bind(view)
         appContext = requireContext().applicationContext
         analysisExecutor = Executors.newSingleThreadExecutor()
+        voiceCoach = VoiceCoach(appContext)
 
         binding.btnFlip.setOnClickListener {
             lensFacing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
@@ -173,24 +186,60 @@ class CameraScreen :
         }
     }
 
-    // Replaced: Updated handleResult to include State Machine logic and Overlay updates
+
     private fun handleResult(result: PoseResult) {
-        val snapshot = stateMachine.update(result, SystemClock.elapsedRealtime())
-        _binding?.overlay?.update(result)
+        val nowMs = SystemClock.elapsedRealtime()
+        val snapshot = stateMachine.update(result, nowMs)
+        val live = validator.validate(result)
+        scoreTracker.onFrame(live)
+
+        if (snapshot.repCompleted) {
+            val depthIssue = validator.evaluateRep(snapshot.lastRepMinAngle)
+            scoreTracker.onRepCompleted(depthOk = depthIssue == null)
+            voiceCoach?.announceRep(snapshot.reps)
+            if (depthIssue != null) {
+                stickyFeedback = depthIssue
+                stickyUntilMs = nowMs + STICKY_MS
+            }
+        }
+
+        // A live fault always wins; the depth tip only fills the gaps while it is fresh.
+        val sticky = stickyFeedback
+        val shown = if (live.severity == Severity.INFO && sticky != null && nowMs < stickyUntilMs) {
+            sticky
+        } else {
+            live
+        }
+
+        voiceCoach?.speakFeedback(shown)
+        _binding?.overlay?.update(result, live.faultyParts)
 
         frameCount++
-        val now = SystemClock.elapsedRealtime()
-        if (now - windowStartMs >= 1000) {
+        if (nowMs - windowStartMs >= 1000) {
             fps = frameCount
             frameCount = 0
-            windowStartMs = now
+            windowStartMs = nowMs
         }
         val angleText = snapshot.angle?.let { "${it.toInt()}°" } ?: "--"
-        val text = "FPS $fps | ${result.latencyMs} ms | ${stateMachine.exercise.displayName}" +
+        val debugText = "FPS $fps | ${result.latencyMs} ms | ${exercise.displayName}" +
                 " | angle $angleText | ${snapshot.state} | reps ${snapshot.reps}"
-        _binding?.root?.post { _binding?.tvDebug?.text = text }
+        val feedbackText = shown.message
+        val feedbackColor = severityColor(shown.severity)
+
+        _binding?.root?.post {
+            _binding?.tvDebug?.text = debugText
+            _binding?.tvFeedback?.let {
+                it.text = feedbackText
+                it.setTextColor(feedbackColor)
+            }
+        }
     }
 
+    private fun severityColor(severity: Severity): Int = when (severity) {
+        Severity.INFO -> Color.parseColor("#2ECC71")
+        Severity.WARNING -> Color.parseColor("#F5A623")
+        Severity.ERROR -> Color.parseColor("#E74C3C")
+    }
     override fun onDestroyView() {
         cameraProvider?.unbindAll()
         cameraProvider = null
@@ -200,11 +249,14 @@ class CameraScreen :
             poseEstimator = null
         }
         analysisExecutor.shutdown()
+        voiceCoach?.shutdown()
+        voiceCoach = null
         _binding = null
         super.onDestroyView()
     }
 
     private companion object {
         const val TAG = "CameraScreen"
+        const val STICKY_MS = 2_000L
     }
 }
