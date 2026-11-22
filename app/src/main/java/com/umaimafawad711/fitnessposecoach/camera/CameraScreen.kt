@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
@@ -24,42 +27,55 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.activityViewModels
+import androidx.navigation.fragment.findNavController
 import com.umaimafawad711.fitnessposecoach.R
-import com.umaimafawad711.fitnessposecoach.databinding.FragmentCameraBinding
-import com.umaimafawad711.fitnessposecoach.pose.PoseEstimator
-import com.umaimafawad711.fitnessposecoach.pose.PoseResult
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import com.umaimafawad711.fitnessposecoach.analysis.ExerciseStateMachine
 import com.umaimafawad711.fitnessposecoach.analysis.ExerciseType
-import android.graphics.Color
 import com.umaimafawad711.fitnessposecoach.analysis.Feedback
 import com.umaimafawad711.fitnessposecoach.analysis.FormScoreTracker
 import com.umaimafawad711.fitnessposecoach.analysis.FormValidator
 import com.umaimafawad711.fitnessposecoach.analysis.Severity
+import com.umaimafawad711.fitnessposecoach.data.SessionResult
+import com.umaimafawad711.fitnessposecoach.databinding.FragmentCameraBinding
+import com.umaimafawad711.fitnessposecoach.pose.PoseEstimator
+import com.umaimafawad711.fitnessposecoach.pose.PoseResult
+import com.umaimafawad711.fitnessposecoach.ui.WorkoutViewModel
+import com.umaimafawad711.fitnessposecoach.util.formatDuration
 import com.umaimafawad711.fitnessposecoach.voice.VoiceCoach
-class CameraScreen :
-    Fragment(R.layout.fragment_camera) {
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+class CameraScreen : Fragment(R.layout.fragment_camera) {
+
+    private enum class SessionState { READY, RUNNING, PAUSED, FINISHED }
+
+    private val viewModel: WorkoutViewModel by activityViewModels()
 
     private var _binding: FragmentCameraBinding? = null
     private val binding get() = checkNotNull(_binding)
 
     private lateinit var appContext: Context
     private lateinit var analysisExecutor: ExecutorService
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Created and used only on analysisExecutor's thread (TFLite Interpreter is not thread-safe).
-    private var poseEstimator: PoseEstimator? = null
-
-    // Added State Machine (Hardcoded to SQUAT for now)
-
-    private val exercise = ExerciseType.SQUAT
-    private val stateMachine = ExerciseStateMachine(exercise)
-    private val validator = FormValidator(exercise)
+    // Assigned on the main thread before the analyzer is attached; used on the analysis thread only.
+    private lateinit var exercise: ExerciseType
+    private lateinit var stateMachine: ExerciseStateMachine
+    private lateinit var validator: FormValidator
     private val scoreTracker = FormScoreTracker()
     private var stickyFeedback: Feedback? = null
     private var stickyUntilMs = 0L
-
+    private var poseEstimator: PoseEstimator? = null // analysis thread only
     private var voiceCoach: VoiceCoach? = null
+
+    // Session clock: main thread only. sessionState is also read by the analysis thread.
+    @Volatile
+    private var sessionState = SessionState.READY
+    private var startedAtMs = 0L
+    private var accumulatedMs = 0L
+    private var runningSinceMs = 0L
+
     private var cameraProvider: ProcessCameraProvider? = null
     private var lensFacing = CameraSelector.LENS_FACING_FRONT
     private var permissionRequested = false
@@ -68,6 +84,13 @@ class CameraScreen :
     private var frameCount = 0
     private var fps = 0
     private var windowStartMs = SystemClock.elapsedRealtime()
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            _binding?.tvTimer?.text = formatDuration((elapsedMs() / 1000).toInt())
+            mainHandler.postDelayed(this, 500)
+        }
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -80,6 +103,15 @@ class CameraScreen :
         analysisExecutor = Executors.newSingleThreadExecutor()
         voiceCoach = VoiceCoach(appContext)
 
+        exercise = viewModel.selectedExercise
+        stateMachine = ExerciseStateMachine(exercise)
+        validator = FormValidator(exercise)
+
+        sessionState = SessionState.READY
+        accumulatedMs = 0L
+        updateButtons()
+        mainHandler.post(ticker)
+
         binding.btnFlip.setOnClickListener {
             lensFacing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
                 CameraSelector.LENS_FACING_BACK
@@ -88,6 +120,20 @@ class CameraScreen :
             }
             bindUseCases()
         }
+
+        binding.btnStartPause.setOnClickListener {
+            when (sessionState) {
+                SessionState.READY -> {
+                    startedAtMs = System.currentTimeMillis()
+                    resumeClock()
+                }
+                SessionState.RUNNING -> pauseClock()
+                SessionState.PAUSED -> resumeClock()
+                SessionState.FINISHED -> Unit
+            }
+        }
+
+        binding.btnFinish.setOnClickListener { finishSession() }
 
         binding.btnGrant.setOnClickListener {
             if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
@@ -118,6 +164,83 @@ class CameraScreen :
             else -> binding.permissionGroup.isVisible = true
         }
     }
+
+    override fun onPause() {
+        // Never keep counting reps while the app is in the background.
+        if (sessionState == SessionState.RUNNING) pauseClock()
+        super.onPause()
+    }
+
+    // ---- Session control (main thread) ----
+
+    private fun elapsedMs(): Long =
+        accumulatedMs + if (sessionState == SessionState.RUNNING) {
+            SystemClock.elapsedRealtime() - runningSinceMs
+        } else {
+            0L
+        }
+
+    private fun resumeClock() {
+        runningSinceMs = SystemClock.elapsedRealtime()
+        sessionState = SessionState.RUNNING
+        updateButtons()
+    }
+
+    private fun pauseClock() {
+        accumulatedMs += SystemClock.elapsedRealtime() - runningSinceMs
+        sessionState = SessionState.PAUSED
+        updateButtons()
+    }
+
+    private fun updateButtons() {
+        _binding?.btnStartPause?.text = when (sessionState) {
+            SessionState.READY -> "Start"
+            SessionState.RUNNING -> "Pause"
+            SessionState.PAUSED -> "Resume"
+            SessionState.FINISHED -> "Saving…"
+        }
+        val active = sessionState != SessionState.FINISHED
+        _binding?.btnStartPause?.isEnabled = active
+        _binding?.btnFinish?.isEnabled = active
+    }
+
+    private fun finishSession() {
+        when (sessionState) {
+            SessionState.FINISHED -> return
+            SessionState.READY -> {
+                findNavController().popBackStack() // nothing was recorded
+                return
+            }
+            SessionState.RUNNING -> pauseClock()
+            SessionState.PAUSED -> Unit
+        }
+        sessionState = SessionState.FINISHED
+        updateButtons()
+
+        val sharedViewModel = viewModel // captured now: the fragment may be detached by the time the callback runs
+        val exerciseType = exercise
+        val started = startedAtMs
+        val durationSec = (accumulatedMs / 1000).toInt()
+
+        // reps/score are written on the analysis thread, so read them there to avoid half-updated values.
+        analysisExecutor.execute {
+            val result = SessionResult(
+                exercise = exerciseType,
+                startedAtMs = started,
+                durationSec = durationSec,
+                reps = stateMachine.reps,
+                formScore = scoreTracker.averageScore
+            )
+            mainHandler.post {
+                sharedViewModel.finishSession(result) // saved even if the user already left this screen
+                if (_binding != null) {
+                    findNavController().navigate(R.id.action_camera_to_summary)
+                }
+            }
+        }
+    }
+
+    // ---- Camera ----
 
     private fun hasCameraPermission() =
         ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) ==
@@ -160,7 +283,6 @@ class CameraScreen :
             .build()
             .also { it.setAnalyzer(analysisExecutor) { image -> analyze(image) } }
 
-        // Added: Update Overlay mirror based on front/back camera
         binding.overlay.mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT
 
         try {
@@ -174,7 +296,8 @@ class CameraScreen :
         }
     }
 
-    // Runs on analysisExecutor.
+    // ---- Analysis (analysisExecutor thread) ----
+
     private fun analyze(image: ImageProxy) {
         try {
             val estimator = poseEstimator ?: PoseEstimator(appContext).also { poseEstimator = it }
@@ -186,33 +309,40 @@ class CameraScreen :
         }
     }
 
-
     private fun handleResult(result: PoseResult) {
         val nowMs = SystemClock.elapsedRealtime()
-        val snapshot = stateMachine.update(result, nowMs)
+        val state = sessionState
+        val running = state == SessionState.RUNNING
         val live = validator.validate(result)
-        scoreTracker.onFrame(live)
 
-        if (snapshot.repCompleted) {
-            val depthIssue = validator.evaluateRep(snapshot.lastRepMinAngle)
-            scoreTracker.onRepCompleted(depthOk = depthIssue == null)
-            voiceCoach?.announceRep(snapshot.reps)
-            if (depthIssue != null) {
-                stickyFeedback = depthIssue
-                stickyUntilMs = nowMs + STICKY_MS
+        // Skeleton and live feedback always show; counting and scoring only while RUNNING.
+        val snapshot = if (running) stateMachine.update(result, nowMs) else null
+        if (snapshot != null) {
+            scoreTracker.onFrame(live)
+            if (snapshot.repCompleted) {
+                val depthIssue = validator.evaluateRep(snapshot.lastRepMinAngle)
+                scoreTracker.onRepCompleted(depthOk = depthIssue == null)
+                voiceCoach?.announceRep(snapshot.reps)
+                if (depthIssue != null) {
+                    stickyFeedback = depthIssue
+                    stickyUntilMs = nowMs + STICKY_MS
+                }
             }
         }
 
-        // A live fault always wins; the depth tip only fills the gaps while it is fresh.
-        val sticky = stickyFeedback
-        val shown = if (live.severity == Severity.INFO && sticky != null && nowMs < stickyUntilMs) {
-            sticky
-        } else {
-            live
+        val shown = when (state) {
+            SessionState.RUNNING -> {
+                // A live fault always wins; the depth tip only fills the gaps while it is fresh.
+                val sticky = stickyFeedback
+                if (live.severity == Severity.INFO && sticky != null && nowMs < stickyUntilMs) sticky else live
+            }
+            SessionState.READY -> Feedback(MSG_READY, Severity.INFO)
+            SessionState.PAUSED -> Feedback(MSG_PAUSED, Severity.INFO)
+            SessionState.FINISHED -> Feedback(MSG_SAVING, Severity.INFO)
         }
 
-        voiceCoach?.speakFeedback(shown)
-        _binding?.overlay?.update(result, live.faultyParts)
+        if (running) voiceCoach?.speakFeedback(shown)
+        _binding?.overlay?.update(result, if (running) live.faultyParts else emptySet())
 
         frameCount++
         if (nowMs - windowStartMs >= 1000) {
@@ -220,14 +350,16 @@ class CameraScreen :
             frameCount = 0
             windowStartMs = nowMs
         }
-        val angleText = snapshot.angle?.let { "${it.toInt()}°" } ?: "--"
+        val angleText = snapshot?.angle?.let { "${it.toInt()}°" } ?: "--"
         val debugText = "FPS $fps | ${result.latencyMs} ms | ${exercise.displayName}" +
-                " | angle $angleText | ${snapshot.state} | reps ${snapshot.reps}"
+                " | angle $angleText | ${stateMachine.state}"
+        val repsText = "Reps ${stateMachine.reps}"
         val feedbackText = shown.message
         val feedbackColor = severityColor(shown.severity)
 
         _binding?.root?.post {
             _binding?.tvDebug?.text = debugText
+            _binding?.tvReps?.text = repsText
             _binding?.tvFeedback?.let {
                 it.text = feedbackText
                 it.setTextColor(feedbackColor)
@@ -240,17 +372,19 @@ class CameraScreen :
         Severity.WARNING -> Color.parseColor("#F5A623")
         Severity.ERROR -> Color.parseColor("#E74C3C")
     }
+
     override fun onDestroyView() {
+        mainHandler.removeCallbacks(ticker) // only the ticker: a pending save callback must still run
         cameraProvider?.unbindAll()
         cameraProvider = null
+        voiceCoach?.shutdown()
+        voiceCoach = null
         // Close the estimator on its own thread, after any in-flight frame finishes.
         analysisExecutor.execute {
             poseEstimator?.close()
             poseEstimator = null
         }
         analysisExecutor.shutdown()
-        voiceCoach?.shutdown()
-        voiceCoach = null
         _binding = null
         super.onDestroyView()
     }
@@ -258,5 +392,8 @@ class CameraScreen :
     private companion object {
         const val TAG = "CameraScreen"
         const val STICKY_MS = 2_000L
+        const val MSG_READY = "Get in position, then press Start"
+        const val MSG_PAUSED = "Paused"
+        const val MSG_SAVING = "Saving workout…"
     }
 }

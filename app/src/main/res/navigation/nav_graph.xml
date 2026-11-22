@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/exerciseSelectScreen">
+
+    <fragment
+        android:id="@+id/exerciseSelectScreen"
+        android:name="com.umaimafawad711.fitnessposecoach.ui.select.ExerciseSelectScreen"
+        android:label="Exercises">
+        <action
+            android:id="@+id/action_select_to_camera"
+            app:destination="@id/cameraScreen" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/cameraScreen"
+        android:name="com.umaimafawad711.fitnessposecoach.camera.CameraScreen"
+        android:label="Workout">
+        <!-- popUpTo: Back from Summary returns to Exercises, never into a dead camera screen. -->
+        <action
+            android:id="@+id/action_camera_to_summary"
+            app:destination="@id/summaryScreen"
+            app:popUpTo="@id/exerciseSelectScreen" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/summaryScreen"
+        android:name="com.umaimafawad711.fitnessposecoach.ui.summary.SummaryScreen"
+        android:label="Summary" />
+</navigation>
